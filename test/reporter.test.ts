@@ -251,4 +251,67 @@ describe('reporter', () => {
       reporter.onBegin(config, suite);
     }).toThrow();
   });
+
+  it('only reports final result after retries, ignoring failed attempts', () => {
+    const startDate = new Date();
+    const startDateISO = formatDate(startDate);
+    advanceTo(startDate);
+
+    const testDuration = 200;
+    const testFile = 'path/to/file.spec.ts';
+
+    const reporter = new PlaywrightCircleCIReporter();
+    const config = createMockConfig();
+    const suite = createMockSuite();
+
+    reporter.onBegin(config, suite);
+
+    // Test 1: Fails first, then passes on retry
+    const test1 = createMockTestCase('test1', ['root', 'test1'], testFile);
+    
+    // First attempt - failed
+    const result1Failed = createMockTestResult('failed', 1200, {
+      name: 'Error',
+      message: 'first attempt failed',
+      stack: 'Error: first attempt failed',
+    });
+    reporter.onTestEnd(test1, result1Failed);
+    
+    // Retry - passed (this should overwrite the failed result)
+    const result1Passed = createMockTestResult('passed', 1000);
+    reporter.onTestEnd(test1, result1Passed);
+
+    // Test 2: Passes on first attempt
+    const test2 = createMockTestCase('test2', ['root', 'test2'], testFile);
+    const result2 = createMockTestResult('passed', 2000);
+    reporter.onTestEnd(test2, result2);
+
+    advanceBy(testDuration);
+
+    reporter.onEnd({ 
+      status: 'passed',
+      startTime: startDate,
+      duration: testDuration
+    });
+
+    const testRunDurationFormatted = formatDuration(testDuration);
+    const test1DurationFormatted = formatDuration(result1Passed.duration);
+    const test2DurationFormatted = formatDuration(result2.duration);
+
+    const files = fs.readdirSync('./test_results/playwright');
+    const actualXML = fs.readFileSync(
+      `./test_results/playwright/${files[0]}`,
+      'utf-8'
+    );
+    
+    // Should only have 2 tests, both passed, 0 failures
+    const expectedXML = `
+      <?xml version="1.0" encoding="UTF-8"?>
+      <testsuite name="playwright" timestamp="${startDateISO}" time="${testRunDurationFormatted}" tests="2" failures="0" skipped="0">
+        <testcase name="${test1.title}" file="${testFile}" time="${test1DurationFormatted}" classname="root"/>
+        <testcase name="${test2.title}" file="${testFile}" time="${test2DurationFormatted}" classname="root"/>
+      </testsuite>`;
+
+    expect(actualXML).toEqualXML(expectedXML);
+  });
 });

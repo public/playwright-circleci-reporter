@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## [1.0.1] - Bug Fix
+
+### Fixed
+
+- **Retry handling**: Fixed a bug where test retries would be reported multiple times. Now only the final result (after all retries) is included in the XML report, properly ignoring failed attempts that were successfully retried.
+
 ## [1.0.0] - Major Conversion to Playwright
 
 This is a major version update that converts the entire package from Cypress to Playwright.

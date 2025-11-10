@@ -1,6 +1,6 @@
 {
   "name": "playwright-circleci-reporter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Kamil Socha (https://github.com/ksocha)",
   "description": "Playwright test reporter for CircleCI",
   "license": "MIT",

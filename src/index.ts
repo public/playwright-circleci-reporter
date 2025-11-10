@@ -69,52 +69,57 @@ class PlaywrightCircleCIReporter implements Reporter {
   }
 
   onTestEnd(test: TestCase, result: TestResult) {
+    // Store the result - this will be overwritten if the test is retried
+    // We only want the final result after all retries
     this.testResults.set(test, result);
-    this.totalTests++;
-
-    const testcaseAttrs = this.getTestcaseAttributes(test, result);
-
-    if (result.status === 'passed') {
-      this.root.ele('testcase', testcaseAttrs);
-    } else if (result.status === 'failed') {
-      this.totalFailures++;
-      const testcaseEl = this.root.ele('testcase', testcaseAttrs);
-
-      const error = result.error;
-      let message = '';
-      let stack = '';
-      let errorType = '';
-
-      if (error) {
-        message = error.message || '';
-        stack = error.stack || message;
-        // Check for name property in error (may not be in the type definition but exists at runtime)
-        errorType = (error as any).name || '';
-      }
-
-      testcaseEl
-        .ele('failure', {
-          message: removeInvalidCharacters(message) || '',
-          type: errorType,
-        })
-        .ele({ $: removeInvalidCharacters(stack) });
-    } else if (result.status === 'skipped') {
-      this.totalSkipped++;
-      this.root.ele('testcase', testcaseAttrs);
-    } else if (result.status === 'timedOut') {
-      this.totalFailures++;
-      const testcaseEl = this.root.ele('testcase', testcaseAttrs);
-      testcaseEl
-        .ele('failure', {
-          message: 'Test timeout',
-          type: 'Timeout',
-        })
-        .ele({ $: 'Test exceeded timeout' });
-    }
   }
 
   onEnd(_result: FullResult) {
     const duration = Date.now() - this.startTime.getTime();
+
+    // Process all final test results (after retries)
+    for (const [test, result] of this.testResults) {
+      this.totalTests++;
+      const testcaseAttrs = this.getTestcaseAttributes(test, result);
+
+      if (result.status === 'passed') {
+        this.root.ele('testcase', testcaseAttrs);
+      } else if (result.status === 'failed') {
+        this.totalFailures++;
+        const testcaseEl = this.root.ele('testcase', testcaseAttrs);
+
+        const error = result.error;
+        let message = '';
+        let stack = '';
+        let errorType = '';
+
+        if (error) {
+          message = error.message || '';
+          stack = error.stack || message;
+          // Check for name property in error (may not be in the type definition but exists at runtime)
+          errorType = (error as any).name || '';
+        }
+
+        testcaseEl
+          .ele('failure', {
+            message: removeInvalidCharacters(message) || '',
+            type: errorType,
+          })
+          .ele({ $: removeInvalidCharacters(stack) });
+      } else if (result.status === 'skipped') {
+        this.totalSkipped++;
+        this.root.ele('testcase', testcaseAttrs);
+      } else if (result.status === 'timedOut') {
+        this.totalFailures++;
+        const testcaseEl = this.root.ele('testcase', testcaseAttrs);
+        testcaseEl
+          .ele('failure', {
+            message: 'Test timeout',
+            type: 'Timeout',
+          })
+          .ele({ $: 'Test exceeded timeout' });
+      }
+    }
 
     this.root.att('time', (duration / 1000).toFixed(4));
     this.root.att('tests', String(this.totalTests));
