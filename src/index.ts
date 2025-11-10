@@ -1,18 +1,16 @@
 import { create } from 'xmlbuilder2';
-import Mocha, { Runner, Suite, Test, MochaOptions } from 'mocha';
-import createStatsCollector from 'mocha/lib/stats-collector';
+import type {
+  Reporter,
+  FullConfig,
+  Suite,
+  TestCase,
+  TestResult,
+  FullResult,
+} from '@playwright/test/reporter';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import stripAnsi from 'strip-ansi';
-
-const {
-  EVENT_RUN_END,
-  EVENT_TEST_FAIL,
-  EVENT_TEST_PASS,
-  EVENT_TEST_PENDING,
-  EVENT_SUITE_BEGIN,
-} = Runner.constants;
 
 // A subset of invalid characters as defined in http://www.w3.org/TR/xml/#charsets that can occur in e.g. stacktraces
 // regex lifted from https://github.com/MylesBorins/xml-sanitizer/ (licensed MIT)
@@ -22,115 +20,142 @@ function removeInvalidCharacters(input: string) {
   return input ? input.replace(INVALID_CHARACTERS_REGEX, '') : input;
 }
 
-function getClassname(test: Test) {
-  let { parent } = test;
-  const titles = [];
-  while (parent) {
-    if (parent.title) {
-      titles.unshift(parent.title);
-    }
-    parent = parent.parent;
-  }
-  return titles.join('.');
+function getClassname(test: TestCase): string {
+  const titlePath = test.titlePath();
+  // Remove the first element (file name) and join the rest
+  return titlePath.slice(0, -1).join('.');
 }
 
-class CypressCircleCIReporter extends Mocha.reporters.Base {
-  file = '';
+interface ReporterOptions {
+  project?: string;
+  resultsDir?: string;
+  resultFileName?: string;
+}
 
-  constructor(runner: Runner, options?: MochaOptions) {
-    super(runner, options);
+class PlaywrightCircleCIReporter implements Reporter {
+  private startTime!: Date;
+  private options: ReporterOptions;
+  private root: any;
+  private totalTests = 0;
+  private totalFailures = 0;
+  private totalSkipped = 0;
+  private testResults: Map<TestCase, TestResult> = new Map();
 
-    createStatsCollector(runner);
-    const projectPath: string | undefined = options?.reporterOptions?.project;
-    const resultsDir: string =
-      options?.reporterOptions?.resultsDir || './test_results/cypress';
+  constructor(options: ReporterOptions = {}) {
+    this.options = options;
+  }
+
+  onBegin(_config: FullConfig, _suite: Suite) {
+    this.startTime = new Date();
+
     const resultFileName: string =
-      options?.reporterOptions?.resultFileName || 'cypress-[hash]';
+      this.options.resultFileName || 'playwright-[hash]';
 
     if (resultFileName.indexOf('[hash]') < 0) {
       throw new Error(`resultFileName must contain '[hash]'`);
     }
 
-    const resultFilePath = path.join(resultsDir, `${resultFileName}.xml`);
-
-    const root = create({ version: '1.0', encoding: 'UTF-8' }).ele(
+    this.root = create({ version: '1.0', encoding: 'UTF-8' }).ele(
       'testsuite',
       {
-        name: 'cypress',
-        timestamp: new Date().toISOString().slice(0, -5),
+        name: 'playwright',
+        timestamp: this.startTime.toISOString().slice(0, -5),
       }
     );
-
-    runner.on(EVENT_SUITE_BEGIN, (suite: Suite) => {
-      if (suite.file) {
-        this.file = path.join(projectPath || '', suite.file);
-      }
-    });
-
-    runner.on(EVENT_TEST_PASS, (test: Test) => {
-      root.ele('testcase', this.getTestcaseAttributes(test));
-    });
-
-    runner.on(EVENT_TEST_FAIL, (test: Test, err: any) => {
-      let message = '';
-      if (err.message && typeof err.message.toString === 'function') {
-        message = String(err.message);
-      } else if (typeof err.inspect === 'function') {
-        message = String(err.inspect());
-      }
-
-      const failureMessage = err.stack || message;
-
-      root
-        .ele('testcase', this.getTestcaseAttributes(test))
-        .ele('failure', {
-          message: removeInvalidCharacters(message) || '',
-          type: err.name || '',
-        })
-        .ele({ $: removeInvalidCharacters(failureMessage) });
-    });
-
-    runner.on(EVENT_TEST_PENDING, (test: Test) => {
-      root.ele('testcase', this.getTestcaseAttributes(test));
-    });
-
-    runner.on(EVENT_RUN_END, () => {
-      root.att('time', ((runner.stats?.duration || 0) / 1000).toFixed(4));
-      root.att('tests', String(runner.stats?.tests || 0));
-      root.att('failures', String(runner.stats?.failures || 0));
-      root.att('skipped', String(runner.stats?.pending || 0));
-
-      const xmlText = root.end({ prettyPrint: true }).toString();
-
-      const finalPath = resultFilePath.replace(
-        '[hash]',
-        crypto
-          .createHash('md5')
-          .update(xmlText)
-          .digest('hex')
-      );
-
-      const finalPathDir = path.dirname(finalPath);
-
-      if (!fs.existsSync(finalPathDir)) {
-        fs.mkdirSync(finalPathDir, { recursive: true });
-      }
-      fs.writeFileSync(finalPath, xmlText, 'utf-8');
-    });
   }
 
-  private getTestcaseAttributes = (test: Test) => {
+  onTestBegin(_test: TestCase, _result: TestResult) {
+    // Test is beginning, we'll handle it in onTestEnd
+  }
+
+  onTestEnd(test: TestCase, result: TestResult) {
+    this.testResults.set(test, result);
+    this.totalTests++;
+
+    const testcaseAttrs = this.getTestcaseAttributes(test, result);
+
+    if (result.status === 'passed') {
+      this.root.ele('testcase', testcaseAttrs);
+    } else if (result.status === 'failed') {
+      this.totalFailures++;
+      const testcaseEl = this.root.ele('testcase', testcaseAttrs);
+
+      const error = result.error;
+      let message = '';
+      let stack = '';
+      let errorType = '';
+
+      if (error) {
+        message = error.message || '';
+        stack = error.stack || message;
+        // Check for name property in error (may not be in the type definition but exists at runtime)
+        errorType = (error as any).name || '';
+      }
+
+      testcaseEl
+        .ele('failure', {
+          message: removeInvalidCharacters(message) || '',
+          type: errorType,
+        })
+        .ele({ $: removeInvalidCharacters(stack) });
+    } else if (result.status === 'skipped') {
+      this.totalSkipped++;
+      this.root.ele('testcase', testcaseAttrs);
+    } else if (result.status === 'timedOut') {
+      this.totalFailures++;
+      const testcaseEl = this.root.ele('testcase', testcaseAttrs);
+      testcaseEl
+        .ele('failure', {
+          message: 'Test timeout',
+          type: 'Timeout',
+        })
+        .ele({ $: 'Test exceeded timeout' });
+    }
+  }
+
+  onEnd(_result: FullResult) {
+    const duration = Date.now() - this.startTime.getTime();
+
+    this.root.att('time', (duration / 1000).toFixed(4));
+    this.root.att('tests', String(this.totalTests));
+    this.root.att('failures', String(this.totalFailures));
+    this.root.att('skipped', String(this.totalSkipped));
+
+    const xmlText = this.root.end({ prettyPrint: true }).toString();
+
+    const resultsDir: string =
+      this.options.resultsDir || './test_results/playwright';
+    const resultFileName: string =
+      this.options.resultFileName || 'playwright-[hash]';
+
+    const resultFilePath = path.join(resultsDir, `${resultFileName}.xml`);
+
+    const finalPath = resultFilePath.replace(
+      '[hash]',
+      crypto.createHash('md5').update(xmlText).digest('hex')
+    );
+
+    const finalPathDir = path.dirname(finalPath);
+
+    if (!fs.existsSync(finalPathDir)) {
+      fs.mkdirSync(finalPathDir, { recursive: true });
+    }
+    fs.writeFileSync(finalPath, xmlText, 'utf-8');
+  }
+
+  private getTestcaseAttributes(test: TestCase, result: TestResult) {
+    const projectPath = this.options.project || '';
+    const filePath = test.location.file;
+    const file = projectPath ? path.join(projectPath, filePath) : filePath;
+
     return {
       name: stripAnsi(test.title),
-      file: this.file,
-      time:
-        typeof test.duration === 'undefined'
-          ? 0
-          : (test.duration / 1000).toFixed(4),
+      file: file,
+      time: (result.duration / 1000).toFixed(4),
       classname: stripAnsi(getClassname(test)),
     };
-  };
+  }
 }
 
-export default CypressCircleCIReporter;
-module.exports = CypressCircleCIReporter;
+export default PlaywrightCircleCIReporter;
+module.exports = PlaywrightCircleCIReporter;
